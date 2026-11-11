@@ -37,6 +37,7 @@
   label { display: block; font-size: 13px; font-weight: 600; margin: 0 0 6px; }
   label:not(:first-child) { margin-top: 14px; }
   .hint { font-weight: 400; color: var(--muted); }
+  #phoneBox { margin-top: 14px; }
   input, select {
     width: 100%;
     font-size: 16px; /* iOSの自動ズーム防止 */
@@ -93,6 +94,11 @@
       <div class="card">
         <label for="name">お名前(本名)</label>
         <input id="name" type="text" autocomplete="name" maxlength="40" placeholder="例:山田 太郎">
+
+        <div id="phoneBox" hidden>
+          <label for="phone">お電話番号 <span class="hint">(初回のみ・ご連絡用)</span></label>
+          <input id="phone" type="tel" inputmode="tel" autocomplete="tel" maxlength="20" placeholder="例:090-1234-5678">
+        </div>
       </div>
 
       <div class="card">
@@ -147,6 +153,37 @@ const $ = (id) => document.getElementById(id);
 const pad = (n) => String(n).padStart(2, '0');
 let busy = [];      // 予約済みの時間帯 [{s, e}](エポックms)
 let ready = false;  // 空き状況を取得できているか
+let needPhone = false; // 初回のお客様(電話番号の入力が必要)か
+
+// 全角数字・ハイフン・空白を取り除き、0から始まる10〜11桁だけ通す(Code.gs の normalizePhone_ と同じ規則)
+function normalizePhone(value) {
+  let t = String(value || '')
+    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/[\s\-ー－‐−()（）]/g, '');
+  if (t.indexOf('+81') === 0) t = '0' + t.slice(3);
+  return /^0\d{9,10}$/.test(t) ? t : '';
+}
+
+function showPhoneBox(on) {
+  needPhone = on;
+  $('phoneBox').hidden = !on;
+}
+
+// 初回のお客様のときだけ電話番号の欄を表示する(確認できない場合も、安全のため表示する)
+async function checkRegistered() {
+  try {
+    const idToken = liff.getIDToken();
+    const res = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'me', idToken }),
+    });
+    const data = await res.json();
+    showPhoneBox(data.ok ? !data.registered : true);
+  } catch (e) {
+    showPhoneBox(true);
+  }
+}
 
 /* ---------- 日時ユーティリティ(端末のタイムゾーンに関係なくJSTで扱う) ---------- */
 const jstNow = () => new Date(Date.now() + 9 * 3600 * 1000);
@@ -316,6 +353,11 @@ $('form').addEventListener('submit', async (ev) => {
   const t = $('start').value;
   const dur = Number($('duration').value);
   if (!name) return showError('お名前を入力してください。');
+  let phone = '';
+  if (needPhone) {
+    phone = normalizePhone($('phone').value);
+    if (!phone) return showError('お電話番号を正しく入力してください(例:090-1234-5678)。');
+  }
   if (!date || !t) return showError('日付と開始時刻を選択してください。');
 
   setLoading(true);
@@ -325,12 +367,13 @@ $('form').addEventListener('submit', async (ev) => {
     const res = await fetch(GAS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // プリフライトを避けるためtext/plain
-      body: JSON.stringify({ idToken, name, start: date + 'T' + t + ':00+09:00', durationMin: dur }),
+      body: JSON.stringify({ idToken, name, phone, start: date + 'T' + t + ':00+09:00', durationMin: dur }),
     });
     const data = await res.json();
     if (!data.ok) {
-      showError(data.error);
+      if (data.needPhone) showPhoneBox(true);
       await loadBusy(); // 最新の空き状況に更新
+      showError(data.error); // 更新で消えないよう、更新のあとに表示する
       return;
     }
     showDone(data);
@@ -352,7 +395,7 @@ $('form').addEventListener('submit', async (ev) => {
   }
   setupDate();
   buildStarts();
-  await loadBusy();
+  await Promise.all([loadBusy(), checkRegistered()]);
 })();
 </script>
 </body>
